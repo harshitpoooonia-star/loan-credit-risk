@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/banner.png" alt="Credit Risk" width="100%"></p>
+
 # Loan Credit Risk Predictor
 
 Predicts whether a loan applicant will default, using a public credit risk dataset. It compares a logistic regression baseline with gradient boosting, picks a decision threshold on validation folds, explains predictions with SHAP, and serves them in a small Streamlit app.
@@ -82,3 +84,7 @@ streamlit run app.py
 - No fairness analysis was done. Age and home ownership are inputs, and a real system would need that review and legal sign-off.
 - SHAP reasons describe what the model uses, not causes.
 - Not suitable for real credit decisions.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

@@ -1,0 +1,20 @@
+{
+  "rows": 32581,
+  "columns": 12,
+  "duplicate_rows": 165,
+  "missing_by_column": {
+    "person_emp_length": 895,
+    "loan_int_rate": 3116
+  },
+  "class_balance": {
+    "0": 25473,
+    "1": 7108
+  },
+  "default_rate": 0.21816396059052823,
+  "person_age_gt_100": 5,
+  "person_age_max": 144,
+  "person_emp_length_gt_60": 2,
+  "person_emp_length_max": 123.0,
+  "person_income_max": 6000000,
+  "emp_length_gt_age": 2
+}

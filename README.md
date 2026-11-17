@@ -2,6 +2,8 @@
 
 # Loan Credit Risk Predictor
 
+[![ci](https://github.com/harshitpoooonia-star/loan-credit-risk/actions/workflows/ci.yml/badge.svg)](https://github.com/harshitpoooonia-star/loan-credit-risk/actions/workflows/ci.yml)
+
 Predicts whether a loan applicant will default, using a public credit risk dataset. It compares a logistic regression baseline with gradient boosting, picks a decision threshold on validation folds, explains predictions with SHAP, and serves them in a small Streamlit app.
 
 ## Problem

@@ -1,115 +1,223 @@
-"""Train, evaluate and explain the credit risk models. Writes reports/metrics.json."""
+"""Train the loan risk model and write everything the app needs.
+
+    python train.py
+
+Steps:
+  1. Load train.csv (614 past home loan applications).
+  2. Compare five models with 5-fold cross-validation.
+  3. Evaluate the chosen model on a 20% held-out split.
+  4. Refit it on all rows and save model/pipeline.joblib.
+  5. Write model/metrics.json and model/dashboard.json for the API.
+  6. Refresh the offline copy of the model and data inside index.html.
+"""
 import json
+import re
+from datetime import datetime, timezone
+from pathlib import Path
 
 import joblib
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import shap
 import sklearn
-from sklearn.metrics import average_precision_score, confusion_matrix, precision_score, recall_score, roc_auc_score
-from sklearn.model_selection import StratifiedKFold, cross_val_predict, train_test_split
+from sklearn.dummy import DummyClassifier
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (accuracy_score, confusion_matrix, precision_score,
+                             recall_score, roc_auc_score, roc_curve)
+from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer, StandardScaler
+from sklearn.tree import DecisionTreeClassifier
 
-import credit_risk as cr
+from features import FEATURES, build_features
 
-MIN_RECALL = 0.80
+ROOT = Path(__file__).parent
+DATA_CSV = ROOT / "train.csv"
+OUT = ROOT / "model"
+INDEX = ROOT / "index.html"
+SEED = 42
+
+FEATURE_LABELS = {
+    "credit_history": "Credit history", "married": "Married", "graduate": "Graduate",
+    "self_employed": "Self-employed", "semiurban": "Semi-urban", "rural": "Rural",
+    "dependents": "Dependents", "log_total_income": "Household income",
+    "log_loan_amount": "Loan amount", "emi_to_income": "Repayment burden",
+}
 
 
-def main() -> None:
-    cr.MODEL_DIR.mkdir(exist_ok=True)
-    cr.REPORT_DIR.mkdir(exist_ok=True)
+def make_pipeline(clf, scale=True):
+    steps = [("features", FunctionTransformer(build_features))]
+    if scale:
+        steps.append(("scale", StandardScaler()))
+    steps.append(("clf", clf))
+    return Pipeline(steps)
 
-    df, clean_info = cr.clean(cr.load_raw())
-    X, y = df[cr.FEATURES], df[cr.TARGET]
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.20, stratify=y, random_state=cr.SEED
-    )
-    print(clean_info, "train", len(X_train), "test", len(X_test))
 
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=cr.SEED)
-    results = {}
-    oof = {}
-    for name in ["logreg", "hgb"]:
-        model = cr.build_model(name)
-        p = cross_val_predict(model, X_train, y_train, cv=cv, method="predict_proba")[:, 1]
-        oof[name] = p
-        fold_auc, fold_pr = [], []
-        for _, va in cv.split(X_train, y_train):
-            fold_auc.append(roc_auc_score(y_train.iloc[va], p[va]))
-            fold_pr.append(average_precision_score(y_train.iloc[va], p[va]))
-        results[name] = {
-            "cv_roc_auc_mean": float(np.mean(fold_auc)), "cv_roc_auc_std": float(np.std(fold_auc)),
-            "cv_pr_auc_mean": float(np.mean(fold_pr)), "cv_pr_auc_std": float(np.std(fold_pr)),
-        }
-        print(name, results[name])
+CANDIDATES = {
+    "Logistic regression": make_pipeline(LogisticRegression(C=0.5, max_iter=1000)),
+    "Decision tree": make_pipeline(DecisionTreeClassifier(max_depth=4, min_samples_leaf=10, random_state=SEED), scale=False),
+    "Random forest": make_pipeline(RandomForestClassifier(n_estimators=300, max_depth=6, min_samples_leaf=5, random_state=SEED), scale=False),
+    "Gradient boosting": make_pipeline(GradientBoostingClassifier(n_estimators=150, max_depth=2, learning_rate=0.05, random_state=SEED), scale=False),
+    "Always approve": make_pipeline(DummyClassifier(strategy="most_frequent"), scale=False),
+}
+CHOSEN = "Logistic regression"
 
-    best = max(results, key=lambda n: results[n]["cv_roc_auc_mean"])
-    print("selected model:", best)
 
-    for name in ["logreg", "hgb"]:
-        thr = cr.pick_threshold(y_train, oof[name], MIN_RECALL)
-        model = cr.build_model(name).fit(X_train, y_train)
-        proba = model.predict_proba(X_test)[:, 1]
-        pred = (proba >= thr).astype(int)
-        tn, fp, fn, tp = confusion_matrix(y_test, pred).ravel()
-        results[name].update({
-            "threshold": thr,
-            "cv_precision_at_threshold": float(precision_score(y_train, oof[name] >= thr)),
-            "cv_recall_at_threshold": float(recall_score(y_train, oof[name] >= thr)),
-            "test_roc_auc": float(roc_auc_score(y_test, proba)),
-            "test_pr_auc": float(average_precision_score(y_test, proba)),
-            "test_precision": float(precision_score(y_test, pred)),
-            "test_recall": float(recall_score(y_test, pred)),
-            "test_confusion": {"tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp)},
-            "test_reject_rate": float(pred.mean()),
+def compare_models(df, y):
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
+    rows = []
+    for name, pipe in CANDIDATES.items():
+        r = cross_validate(pipe, df, y, cv=cv, scoring=["accuracy", "roc_auc"])
+        rows.append({
+            "name": name,
+            "accuracy": round(float(r["test_accuracy"].mean()), 3),
+            "accuracy_sd": round(float(r["test_accuracy"].std()), 3),
+            "auc": round(float(r["test_roc_auc"].mean()), 3),
         })
-        if name == best:
-            final = model
-            final_thr = thr
-            final_proba = proba
+        print(f"  {name:20s} accuracy {rows[-1]['accuracy']:.3f} ± {rows[-1]['accuracy_sd']:.3f}   AUC {rows[-1]['auc']:.3f}")
+    return rows
 
-    metrics = {
-        "dataset": "OpenML 43454 Credit-Risk-Dataset",
-        "data_cleaning": clean_info,
-        "n_train": int(len(X_train)), "n_test": int(len(X_test)),
-        "train_default_rate": float(y_train.mean()), "test_default_rate": float(y_test.mean()),
-        "class_imbalance_handling": "class_weight='balanced' in both models",
-        "cv": "StratifiedKFold(n_splits=5, shuffle=True, random_state=42) on the 80% training split",
-        "threshold_rule": f"highest threshold with recall >= {MIN_RECALL} on 5-fold out-of-fold training predictions; reject if probability >= threshold",
-        "selected_model": best,
-        "selection_rule": "higher mean CV ROC-AUC",
-        "models": results,
-        "seed": cr.SEED,
-        "sklearn_version": sklearn.__version__,
-        "shap_version": shap.__version__,
+
+def why_chosen(comparison):
+    models = [r for r in comparison if r["name"] != "Always approve"]
+    best = max(models, key=lambda r: r["accuracy"])
+    mine = next(r for r in models if r["name"] == CHOSEN)
+    if best is mine:
+        return f"Highest cross-validated accuracy of the models tried, and its weights explain every prediction."
+    gap = (best["accuracy"] - mine["accuracy"]) * 100
+    return (f"{best['name']} scored {gap:.1f} points higher, which is inside the fold-to-fold spread "
+            f"of about {mine['accuracy_sd'] * 100:.1f} points. Logistic regression was kept because its "
+            f"weights explain every prediction.") if gap <= 2 * mine["accuracy_sd"] * 100 else (
+            f"{best['name']} scored {gap:.1f} points higher. Logistic regression was kept for explainability; "
+            f"consider switching.")
+
+
+def holdout(df, y):
+    Xtr, Xte, ytr, yte = train_test_split(df, y, test_size=0.2, random_state=SEED, stratify=y)
+    pipe = make_pipeline(LogisticRegression(C=0.5, max_iter=1000)).fit(Xtr, ytr)
+    proba = pipe.predict_proba(Xte)[:, 1]
+    pred = (proba >= 0.5).astype(int)
+    fpr, tpr, _ = roc_curve(yte, proba)
+    wrong_approvals = Xte[(pred == 1) & (yte.values == 0)]
+    return {
+        "test_n": int(len(yte)),
+        "accuracy": round(accuracy_score(yte, pred), 3),
+        "precision": round(precision_score(yte, pred), 3),
+        "recall": round(recall_score(yte, pred), 3),
+        "auc": round(roc_auc_score(yte, proba), 3),
+        "baseline": round(float(max(y.mean(), 1 - y.mean())), 3),
+        "cm": confusion_matrix(yte, pred).tolist(),   # [[TN, FP], [FN, TP]]
+        "roc": [[round(float(a), 3), round(float(b), 3)] for a, b in zip(fpr, tpr)],
+        "wrong_approvals_clean_credit": int((wrong_approvals["Credit_History"].fillna(1) == 1).sum()),
     }
 
-    joblib.dump(final, cr.MODEL_DIR / "model.joblib")
-    background = X_train.sample(100, random_state=cr.SEED)
-    background.to_csv(cr.MODEL_DIR / "background.csv", index=False)
-    (cr.MODEL_DIR / "threshold.json").write_text(json.dumps({"threshold": final_thr, "model": best}, indent=2))
 
-    # SHAP on the 11 raw features, probability scale, so reasons read in applicant terms.
-    sample = X_test.sample(500, random_state=cr.SEED)
-    f = lambda a: final.predict_proba(cr.decode_array(a))[:, 1]
-    masker = shap.maskers.Independent(cr.encode_frame(background), max_samples=100)
-    explainer = shap.Explainer(f, masker, algorithm="permutation", seed=cr.SEED)
-    sv = explainer(cr.encode_frame(sample), max_evals=2 * len(cr.FEATURES) + 1 + 200, silent=True)
-    shap.summary_plot(sv.values, sample, show=False, max_display=11)
-    plt.tight_layout()
-    plt.savefig(cr.REPORT_DIR / "shap_summary.png", dpi=130, bbox_inches="tight")
-    plt.close()
-    mean_abs = np.abs(sv.values).mean(axis=0)
-    order = np.argsort(-mean_abs)
-    metrics["shap_top_features"] = [
-        {"feature": cr.FEATURES[i], "mean_abs_shap_probability": float(mean_abs[i])} for i in order
-    ]
-    metrics["shap_note"] = "permutation explainer, 500 test rows, 100-row background, probability scale"
+def approval_rates(df, y, col, values, labels):
+    out = []
+    for v, label in zip(values, labels):
+        mask = df[col].isna() if v is None else df[col] == v
+        out.append({"label": label, "n": int(mask.sum()), "approved": int(y[mask].sum())})
+    return out
 
-    (cr.REPORT_DIR / "metrics.json").write_text(json.dumps(metrics, indent=2))
-    print(json.dumps(metrics, indent=2))
+
+def dashboard_data(df, y):
+    income = df["ApplicantIncome"] + df["CoapplicantIncome"]
+    edges = [0, 3000, 4000, 5000, 6000, 8000, 10000, 15000, np.inf]
+    bins = ["<3k", "3–4k", "4–5k", "5–6k", "6–8k", "8–10k", "10–15k", "15k+"]
+    hist = []
+    for i, label in enumerate(bins):
+        m = (income >= edges[i]) & (income < edges[i + 1])
+        hist.append({"label": label, "approved": int((m & (y == 1)).sum()), "rejected": int((m & (y == 0)).sum())})
+    has_amount = df["LoanAmount"].notna()
+    return {
+        "kpi": {
+            "n": int(len(df)), "approved": int(y.sum()),
+            "median_income": float(income.median()), "median_loan": float(df["LoanAmount"].median()),
+            "missing_rows": int(df.isnull().any(axis=1).sum()),
+        },
+        "by_credit": approval_rates(df, y, "Credit_History", [1.0, 0.0, None], ["Meets guidelines", "Doesn't", "Not recorded"]),
+        "by_area": approval_rates(df, y, "Property_Area", ["Semiurban", "Urban", "Rural"], ["Semi-urban", "Urban", "Rural"]),
+        "by_edu": approval_rates(df, y, "Education", ["Graduate", "Not Graduate"], ["Graduate", "Not graduate"]),
+        "by_married": approval_rates(df, y, "Married", ["Yes", "No"], ["Married", "Single"]),
+        "by_dep": approval_rates(df, y, "Dependents", ["0", "1", "2", "3+"], ["0", "1", "2", "3+"]),
+        "by_self": approval_rates(df, y, "Self_Employed", ["No", "Yes"], ["Salaried", "Self-employed"]),
+        "income_hist": hist,
+        "scatter": [[int(i), int(a), int(s)] for i, a, s in zip(income[has_amount], df.loc[has_amount, "LoanAmount"], y[has_amount])],
+        "missing": sorted(
+            [{"label": k, "n": int(v)} for k, v in df.isnull().sum().items() if v > 0], key=lambda d: -d["n"]),
+    }
+
+
+def browser_copy(pipe):
+    """The fitted numbers the page needs to score offline, when no server is running."""
+    scale, clf = pipe.named_steps["scale"], pipe.named_steps["clf"]
+    return {
+        "features": FEATURES,
+        "mean": [round(float(v), 6) for v in scale.mean_],
+        "std": [round(float(v), 6) for v in scale.scale_],
+        "coef": [round(float(v), 6) for v in clf.coef_[0]],
+        "intercept": round(float(clf.intercept_[0]), 6),
+    }
+
+
+def sync_index(model_copy, data):
+    if not INDEX.exists():
+        print("  index.html not found, skipped the offline copy")
+        return
+    html = INDEX.read_text(encoding="utf-8")
+    for key, value in (("MODEL", model_copy), ("DATA", data)):
+        pattern = rf"/\*{key}\*/.*?/\*END\*/"
+        if not re.search(pattern, html, flags=re.S):
+            raise SystemExit(f"index.html has no /*{key}*/ ... /*END*/ marker")
+        payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+        html = re.sub(pattern, lambda _: f"/*{key}*/{payload}/*END*/", html, count=1, flags=re.S)
+    INDEX.write_text(html, encoding="utf-8")
+    print("  refreshed the offline copy in index.html")
+
+
+def main():
+    df = pd.read_csv(DATA_CSV)
+    y = (df["Loan_Status"] == "Y").astype(int)
+    print(f"Loaded {len(df)} applications, {y.mean():.1%} approved")
+
+    print("Comparing models, 5-fold cross-validation:")
+    comparison = compare_models(df, y)
+
+    print(f"Held-out test for {CHOSEN}:")
+    test = holdout(df, y)
+    print(f"  accuracy {test['accuracy']:.3f}  AUC {test['auc']:.3f}  (always approve: {test['baseline']:.3f})")
+
+    final = make_pipeline(LogisticRegression(C=0.5, max_iter=1000)).fit(df, y)
+    OUT.mkdir(exist_ok=True)
+    joblib.dump({
+        "pipeline": final,
+        "features": FEATURES,
+        "sklearn_version": sklearn.__version__,
+        "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "rows": int(len(df)),
+    }, OUT / "pipeline.joblib")
+
+    coef = final.named_steps["clf"].coef_[0]
+    cv_row = next(r for r in comparison if r["name"] == CHOSEN)
+    metrics = {
+        "chosen": CHOSEN,
+        "why": why_chosen(comparison),
+        **test,
+        "cv": cv_row["accuracy"],
+        "comparison": comparison,
+        "weights": sorted(
+            [{"key": f, "label": FEATURE_LABELS[f], "w": round(float(c), 6)} for f, c in zip(FEATURES, coef)],
+            key=lambda d: -d["w"]),
+    }
+    (OUT / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+
+    data = dashboard_data(df, y)
+    data["model"] = {k: metrics[k] for k in ("accuracy", "auc", "precision", "recall", "test_n", "cm", "roc", "cv", "baseline", "wrong_approvals_clean_credit", "comparison", "chosen", "why")}
+    data["weights"] = metrics["weights"]
+    (OUT / "dashboard.json").write_text(json.dumps(data, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
+    print(f"Saved {OUT / 'pipeline.joblib'}, metrics.json and dashboard.json")
+
+    sync_index(browser_copy(final), data)
 
 
 if __name__ == "__main__":

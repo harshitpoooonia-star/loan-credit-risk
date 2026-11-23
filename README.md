@@ -1,92 +1,152 @@
-<p align="center"><img src="assets/banner.png" alt="Credit Risk" width="100%"></p>
-
 # Loan Credit Risk Predictor
 
-[![ci](https://github.com/harshitpoooonia-star/loan-credit-risk/actions/workflows/ci.yml/badge.svg)](https://github.com/harshitpoooonia-star/loan-credit-risk/actions/workflows/ci.yml)
+Predicts how likely a home loan application is to be approved, explains which details pushed the score up or down, and wraps it all in a dashboard with data insights, model evaluation and loan calculators.
 
-Predicts whether a loan applicant will default, using a public credit risk dataset. It compares a logistic regression baseline with gradient boosting, picks a decision threshold on validation folds, explains predictions with SHAP, and serves them in a small Streamlit app.
+AI/ML Lab project, 5th semester, B.Tech CSE (Robotics and IoT), Bennett University.
 
-## Problem
+## What's in it
 
-Given an applicant's income, age, employment length, loan details and credit history, estimate the probability that the loan ends in default (`loan_status = 1`), then approve or reject at a cutoff chosen so that at least 80% of defaulters are caught.
+- **Model:** a scikit-learn pipeline (feature engineering, scaling, logistic regression) trained on `train.csv`.
+- **API:** FastAPI server that loads the saved pipeline and scores applications.
+- **Dashboard:** `index.html`, with four sections:
+  - **Assess:** enter an application and get an approval chance, a risk band, the top factors behind the score and a what-if chart across loan amounts.
+  - **Insights:** approval rates by credit history, property area, marital status, education, employment and dependents. Also an income histogram, a loan-against-income scatter, and missing data per column.
+  - **Model:** cross-validated and held-out accuracy, confusion matrix, ROC curve, feature weights and the model comparison.
+  - **Calculators:** EMI with a yearly principal and interest split, affordability, and prepayment savings.
 
-## Data
+## Dashboard design
 
-- Source: OpenML dataset 43454, "Credit-Risk-Dataset": https://www.openml.org/d/43454
-- 32,581 rows, 11 features plus the target. 21.8% of raw rows are defaults.
-- Licence: OpenML lists it as CC0 (public domain). Check the OpenML page before reusing it.
-- The data is not stored in this repo. `python download_data.py` fetches it into `data/credit_risk.csv`.
+The dashboard follows Apple's design language: system colours, grouped forms, segmented controls, and Liquid Glass only on the sidebar, tab bar and top bar. It is one HTML file with no frameworks, fonts or CDN calls, so it also works opened straight from disk.
 
-Cleaning (see `credit_risk.clean`): 165 exact duplicate rows dropped, and 7 rows with an age over 100 or employment length over 60 years dropped. That leaves 32,409 rows. Missing values (895 in `person_emp_length`, 3,116 in `loan_int_rate`) are imputed inside the pipeline. `python eda.py` writes `reports/eda.json` and `reports/eda.png`.
+- Works at phone, tablet and desktop widths, in light and dark mode.
+- Every chart can be read by keyboard: Tab to it, then use the arrow keys. Each value shows a tooltip and is announced to screen readers. Every chart also has a data table.
+- Text meets 4.5:1 contrast, touch controls are at least 44 px, and the page respects reduced motion and reduced transparency settings.
+- Every number in the page text comes from the data or the model, so retraining updates the page.
 
-## Method
+## Dataset
 
-- Split: stratified 80/20. 25,927 training rows and 6,482 test rows. The test set is used once, at the end.
-- Preprocessing (sklearn Pipeline): median imputation with missing indicators and scaling for numbers, most-frequent imputation and one-hot encoding for categories (unseen categories ignored).
-- Imbalance: `class_weight="balanced"` in both models. No resampling.
-- Models: LogisticRegression and HistGradientBoostingClassifier (no LightGBM, no PyTorch).
-- Validation: stratified 5-fold CV on the training split, seed 42. The model with the higher mean CV ROC-AUC is selected (HistGradientBoosting).
-- Threshold rule: the highest cutoff whose recall is at least 0.80 on the 5-fold out-of-fold training predictions. Reject when probability is at or above the cutoff. That cutoff is then applied unchanged to the test set.
-- Explanations: SHAP permutation explainer on the 11 raw features, probability scale (500 test rows, 100-row background). HistGradientBoosting is not supported by SHAP's tree explainer, so the model-agnostic explainer is used.
+`train.csv` has 614 past applications with 13 columns: applicant and co-applicant monthly income, loan amount (in thousands), term (in months), credit history, property area, marital status, dependents, education, self-employment, gender and the outcome (`Loan_Status`). 422 applications (68.7%) were approved. 134 rows have at least one blank value.
+
+## Features
+
+`features.py` turns each row into 10 numbers:
+
+| Feature | How it's built |
+|---|---|
+| credit_history | 1 if it meets guidelines. Blanks count as 1, since 74% of those applicants were approved. |
+| married, graduate, self_employed | Yes/no as 1/0 |
+| semiurban, rural | Property area, with urban as the reference |
+| dependents | 0 to 3, where 3 means three or more |
+| log_total_income | log(1 + applicant + co-applicant income) |
+| log_loan_amount | log(1 + loan amount). Blanks use the median, 128. |
+| emi_to_income | (amount x 1000 / term) / household income |
+
+Gender is left out on purpose. A lending model shouldn't score people on it.
 
 ## Results
 
-All numbers below are copied from `reports/metrics.json`, produced by `python train.py`.
+5-fold cross-validation on all 614 rows:
 
-| Metric | Logistic regression | HistGradientBoosting |
+| Model | Accuracy | ROC AUC |
 |---|---|---|
-| CV ROC-AUC (mean +/- sd) | 0.8712 +/- 0.0050 | 0.9456 +/- 0.0025 |
-| CV PR-AUC (mean +/- sd) | 0.7205 +/- 0.0118 | 0.9015 +/- 0.0028 |
-| Threshold (from CV predictions) | 0.4483 | 0.4677 |
-| CV precision / recall at threshold | 0.5120 / 0.8000 | 0.8222 / 0.8000 |
-| Test ROC-AUC | 0.8719 | 0.9512 |
-| Test PR-AUC | 0.7068 | 0.9112 |
-| Test precision at threshold | 0.5066 | 0.8210 |
-| Test recall at threshold | 0.8082 | 0.8216 |
-| Test reject rate | 0.3490 | 0.2189 |
+| Logistic regression | 80.3% ± 1.7 | 0.757 |
+| Decision tree | 79.8% ± 2.5 | 0.722 |
+| Random forest | 80.9% ± 1.2 | 0.776 |
+| Gradient boosting | 79.8% ± 2.0 | 0.768 |
+| Always approve | 68.7% ± 0.4 | 0.500 |
 
-Selected model confusion matrix on the test set at its threshold: 4810 true negatives, 254 false positives, 253 false negatives, 1165 true positives.
+Random forest scored 0.6 points higher, which is inside the fold-to-fold spread of about 1.7 points. Logistic regression was kept because its weights explain every prediction.
 
-Top features by mean absolute SHAP value (change in default probability):
+On a 20% held-out split (123 applications), the served model scores 85.4% accuracy, AUC 0.863, precision 83.2% and recall 98.8%. That beats the cross-validated figure because this split happens to be an easier one. Treat 80.3% as the honest estimate.
 
-1. `person_income` (0.0979)
-2. `loan_percent_income` (0.0783)
-3. `person_home_ownership` (0.0751)
-4. `loan_int_rate` (0.0682)
-5. `loan_grade` (0.0656)
-6. `loan_intent` (0.0600)
+Confusion matrix on the held-out split:
 
-![SHAP summary](reports/shap_summary.png)
+|  | Predicted reject | Predicted approve |
+|---|---|---|
+| Actually rejected | 21 | 17 |
+| Actually approved | 1 | 84 |
 
-Categorical features appear grey in the summary plot because they are plain labels, not ordered numbers.
+The model almost never turns away a good applicant, but it lets through 17 of 38 risky ones. All 17 of those had a clean credit history, which is by far the strongest signal in the data (80% approval with it, 8% without).
 
-## How to run
+## Run it
+
+Needs Python 3.10 or newer. Tested on Python 3.10 with scikit-learn 1.3, and on Python 3.13 with scikit-learn 1.9. Always run `train.py` after installing, so the saved model matches your scikit-learn version.
+
+On Windows, the quickest way is to double-click `run.bat`. The first run creates `.venv`, installs the requirements and trains the model. After that it starts the server and opens the dashboard in your browser. Close its window to stop the server.
+
+Or do the same steps by hand:
 
 ```
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
-python download_data.py
-python eda.py
 python train.py
-pytest
-streamlit run app.py
+uvicorn app:app --reload
 ```
 
-`train.py` writes `models/` and `reports/`. The app needs `models/` to exist, so run `train.py` first. Training plus SHAP takes a few minutes on 2 CPUs.
+On macOS or Linux, activate with `source .venv/bin/activate` instead.
 
-## Tests
+Open http://127.0.0.1:8000. The page shows "Scored by the Python model through FastAPI" when it's connected.
 
-`pytest` covers the data schema and cleaning, pipeline fit and predict shapes, probability range, threshold logic, and the app helper functions. Last run: 21 passed.
+You can also open `index.html` directly without the server. It falls back to a copy of the model built into the page, so the dashboard still works offline. `train.py` keeps that copy in sync, and a test checks that both give the same answer.
+
+Run the tests with `python -m pytest -q`.
+
+## API
+
+Interactive docs are at http://127.0.0.1:8000/docs once the server is running.
+
+| Method | Path | What it does |
+|---|---|---|
+| GET | `/api/health` | Model name, training time, row count |
+| GET | `/api/stats` | Data behind the Insights and Model pages |
+| POST | `/api/predict` | Scores one application |
+| POST | `/api/what-if` | Approval chance across loan amounts from ₹10k to ₹700k |
+
+Example request:
+
+```json
+{
+  "applicant_income": 4583,
+  "coapplicant_income": 1508,
+  "loan_amount": 128,
+  "loan_term": 360,
+  "credit_history": 1,
+  "property_area": "Rural",
+  "married": true,
+  "dependents": 1,
+  "graduate": true,
+  "self_employed": false
+}
+```
+
+The response includes `probability`, `band` (low, moderate or high), and `factors`, each feature's push on the log-odds, largest first.
+
+## Files
+
+```
+features.py            feature engineering shared by training and the API
+train.py               compares models, evaluates, saves the pipeline and dashboard data
+app.py                 FastAPI server
+index.html             dashboard
+run.bat                one-click setup and start on Windows
+model/pipeline.joblib  trained pipeline
+model/metrics.json     evaluation results
+model/dashboard.json   chart data for the dashboard
+tests/test_api.py      API and consistency tests
+requirements.txt       dependencies
+train.csv              dataset
+explore.py             first look at the data
+```
 
 ## Limitations
 
-- The dataset is a public sample with no dates, so there is no time-based split. Real lending needs out-of-time validation.
-- Loan grade and interest rate are set by the lender before the outcome is known, which is fine for this exercise, but they already carry much of the risk signal.
-- Test metrics come from one split and one seed. Differences of a point or two should not be over-read.
-- The threshold targets recall of 0.80 on training folds. Test recall landed at 0.8216, so it does not hit 0.80 exactly on new data.
-- No fairness analysis was done. Age and home ownership are inputs, and a real system would need that review and legal sign-off.
-- SHAP reasons describe what the model uses, not causes.
-- Not suitable for real credit decisions.
+- 614 rows is small. Scores shift by a point or two between random splits.
+- Credit history dominates. Income barely moves the score, so the model can't tell a stretched applicant from a comfortable one if both have clean credit.
+- Loan amounts outside ₹9k to ₹700k are beyond what the model has seen, and the API flags them.
+- The repayment the model sees is amount divided by term, without interest. The EMI calculator adds interest.
+- This is a lab project, not a lending tool.
 
-## License
+## Credits
 
-MIT. See [LICENSE](LICENSE).
+Frontend designed by Harshit Poonia.

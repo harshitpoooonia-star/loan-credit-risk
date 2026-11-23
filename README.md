@@ -92,6 +92,10 @@ You can also open `index.html` directly without the server. It falls back to a c
 
 Run the tests with `python -m pytest -q`.
 
+## Put it online
+
+`render.yaml` deploys the server and dashboard to [Render](https://render.com) on the free plan. In Render, choose **New**, then **Blueprint**, and pick this repository. The build installs the requirements and trains the model, then starts the server. Each push to `main` deploys again. Free services sleep when idle, so the first visit after a quiet spell takes about half a minute.
+
 ## API
 
 Interactive docs are at http://127.0.0.1:8000/docs once the server is running.
@@ -130,6 +134,7 @@ train.py               compares models, evaluates, saves the pipeline and dashbo
 app.py                 FastAPI server
 index.html             dashboard
 run.bat                one-click setup and start on Windows
+render.yaml            deploy settings for Render
 model/pipeline.joblib  trained pipeline
 model/metrics.json     evaluation results
 model/dashboard.json   chart data for the dashboard
